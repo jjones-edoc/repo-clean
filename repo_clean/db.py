@@ -28,6 +28,23 @@ def init_db(db_path: Path) -> None:
     conn.close()
 
 
+def insert_todo(db_path: Path, description: str, file_path: str, rule: str, sort_order: int = 0) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute(
+        "SELECT 1 FROM todos WHERE file_path = ? AND rule = ? AND status != 'complete' AND status != 'skipped'",
+        (file_path, rule),
+    )
+    if c.fetchone() is None:
+        c.execute(
+            "INSERT INTO todos (sort_order, description, file_path, rule, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+            (sort_order, description, file_path, rule, now, now),
+        )
+        conn.commit()
+    conn.close()
+
+
 def count_by_status(db_path: Path, status: str) -> int:
     conn = sqlite3.connect(db_path)
     c = conn.cursor()

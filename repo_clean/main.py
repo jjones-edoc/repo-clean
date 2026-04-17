@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .db import init_db, count_by_status, finalize_clean, print_status
+from .db import init_db, insert_todo, count_by_status, finalize_clean, print_status
 from .skill import sync_skill
 
 
@@ -55,9 +55,42 @@ def run_claude_interactive(prompt: str) -> int:
     return result.returncode
 
 
-def run_full(db_path: Path) -> None:
-    if count_by_status(db_path, "pending") == 0:
+FILE_SIZE_LIMIT_LINES = 1900
+
+
+def seed_large_files(repo_root: Path, db_path: Path) -> None:
+    result = subprocess.run(
+        ["git", "ls-files"],
+        capture_output=True, text=True, cwd=repo_root
+    )
+    if result.returncode != 0:
+        return
+
+    found = 0
+    for rel_path in result.stdout.splitlines():
+        abs_path = repo_root / rel_path
+        try:
+            line_count = sum(1 for _ in abs_path.open(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
+        if line_count > FILE_SIZE_LIMIT_LINES:
+            insert_todo(
+                db_path,
+                description=f"File is {line_count} lines — split into smaller, focused modules",
+                file_path=rel_path,
+                rule="file-size",
+                sort_order=0,
+            )
+            found += 1
+
+    if found:
+        print(f"==> {found} large file(s) added to todo list.")
+
+
+def run_full(repo_root: Path, db_path: Path) -> None:
+    if count_by_status(db_path, "pending") == 0 and count_by_status(db_path, "in_progress") == 0:
         print("\n==> No pending items. Running build phase...\n")
+        seed_large_files(repo_root, db_path)
         run_claude_headless("use the repo-clean skill with the build parameter")
 
         if count_by_status(db_path, "pending") == 0:
@@ -65,8 +98,16 @@ def run_full(db_path: Path) -> None:
             finalize_clean(db_path)
             return
 
-    while count_by_status(db_path, "pending") > 0:
-        remaining = count_by_status(db_path, "pending")
+    print("\n==> Build complete. Starting interactive review...\n")
+    run_claude_interactive("use the repo-clean skill with the summarize parameter")
+
+    answer = input("\nStart cleaning? (y/n): ").strip().lower()
+    if answer != "y":
+        print("Run repo-clean again to start cleaning.")
+        return
+
+    while count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress") > 0:
+        remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
         print(f"\n==> {remaining} item(s) remaining. Running clean...\n")
         run_claude_headless("use the repo-clean skill with the clean parameter")
 
@@ -107,11 +148,12 @@ def main() -> None:
     init_db(db_path)
 
     if args.command == "build":
+        seed_large_files(repo_root, db_path)
         run_claude_headless("use the repo-clean skill with the build parameter")
     elif args.command == "clean":
-        while count_by_status(db_path, "pending") > 0:
-            remaining = count_by_status(db_path, "pending")
+        while count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress") > 0:
+            remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
             print(f"\n==> {remaining} item(s) remaining. Running clean...\n")
             run_claude_headless("use the repo-clean skill with the clean parameter")
     else:
-        run_full(db_path)
+        run_full(repo_root, db_path)
