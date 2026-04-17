@@ -180,7 +180,7 @@ Work ONE pending todo item, then exit. The calling script handles the loop.
 
 ### `summarize`
 
-Interactively review results with the user. Stay in conversation until they are satisfied.
+Interactively review the todo list with the user. Your role here is **todo list management only** — do NOT work, fix, or implement any items. Stay in conversation until the user says they are done.
 
 **Steps:**
 
@@ -194,9 +194,9 @@ Interactively review results with the user. Stay in conversation until they are 
    - Reset a failed item: `UPDATE todos SET status='pending', notes=NULL, updated_at=? WHERE id=?`
    - Add a new item: `INSERT INTO todos ...` (append to sort_order)
    - Skip an item: `UPDATE todos SET status='skipped', updated_at=? WHERE id=?`
-   - Add notes to a failed item before retrying
-   - Ask questions about the codebase or review specific files
-4. Remain interactive until the user explicitly says they are done
+   - Add notes to an item
+   - Ask questions about the codebase or review specific files to decide whether to keep or skip an item
+4. When the user is satisfied with the list, remind them to type `/exit` to return to the clean loop
 
 ### `status`
 

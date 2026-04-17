@@ -51,7 +51,7 @@ def run_claude_headless(prompt: str) -> int:
 
 
 def run_claude_interactive(prompt: str) -> int:
-    result = subprocess.run(["claude", prompt])
+    result = subprocess.run(["claude", "--dangerously-skip-permissions", prompt])
     return result.returncode
 
 
@@ -87,6 +87,15 @@ def seed_large_files(repo_root: Path, db_path: Path) -> None:
         print(f"==> {found} large file(s) added to todo list.")
 
 
+def run_clean_loop(db_path: Path) -> None:
+    while True:
+        remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
+        if remaining == 0:
+            break
+        print(f"\n==> {remaining} item(s) remaining. Running clean...\n")
+        run_claude_headless("use the repo-clean skill with the clean parameter")
+
+
 def run_full(repo_root: Path, db_path: Path) -> None:
     if count_by_status(db_path, "pending") == 0 and count_by_status(db_path, "in_progress") == 0:
         print("\n==> No pending items. Running build phase...\n")
@@ -106,10 +115,7 @@ def run_full(repo_root: Path, db_path: Path) -> None:
         print("Run repo-clean again to start cleaning.")
         return
 
-    while count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress") > 0:
-        remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
-        print(f"\n==> {remaining} item(s) remaining. Running clean...\n")
-        run_claude_headless("use the repo-clean skill with the clean parameter")
+    run_clean_loop(db_path)
 
     print("\n==> All pending items processed. Starting interactive summary...\n")
     run_claude_interactive("use the repo-clean skill with the summarize parameter")
@@ -151,9 +157,6 @@ def main() -> None:
         seed_large_files(repo_root, db_path)
         run_claude_headless("use the repo-clean skill with the build parameter")
     elif args.command == "clean":
-        while count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress") > 0:
-            remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
-            print(f"\n==> {remaining} item(s) remaining. Running clean...\n")
-            run_claude_headless("use the repo-clean skill with the clean parameter")
+        run_clean_loop(db_path)
     else:
         run_full(repo_root, db_path)
