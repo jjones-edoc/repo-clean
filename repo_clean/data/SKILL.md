@@ -75,10 +75,12 @@ conn.commit(); conn.close()
 Apply these rules when analyzing code. Each rule has a `rule` identifier for the DB.
 
 ### `dry` — DRY Principle
-Flag only confirmed code duplication: the same logic appearing in multiple places where extracting it would genuinely simplify both call sites. Do NOT flag based on textual similarity alone, boilerplate, test setup, or config patterns. Do NOT create abstractions for code that "might" be reused. If in doubt, skip it.
+Flag duplication only when extracting a helper would reduce total line count (helper body + per-call-site overhead < current duplication). If it breaks even or grows, skip it.
 
 ### `file-size` — File Size
 Files over 1,900 lines must be split into smaller, focused modules. These are pre-flagged by the caller before build runs — do not re-detect them.
+
+When working a `file-size` todo, skip with a note if the file is primarily generated, vendored, or flat declarative data (lookup tables, SQL schemas, protocol definitions, large dispatch/match tables). Splitting these doesn't improve the code.
 
 ### `comments` — Comment Policy
 Only these comment types are allowed:
@@ -95,13 +97,20 @@ Delete all commented-out code blocks entirely. Do not leave disabled code in the
 Flag files that are definitively unreferenced — not imported, not required, not referenced in any code, config, CI, or build file. Only flag files you are certain about; if there is any doubt (dynamic imports, entry points, scripts, generated files), skip them. Group all candidates into a single todo item worded as: "Verify these files are safe to delete, then delete them: [list]". Do not create one todo per file.
 
 ### `todo-fixme` — TODO / FIXME / SKIP
-Resolve or remove all TODO, FIXME, HACK, and SKIP markers. In test files, never use `t.Skip()`, `skip()`, `xit()`, `xtest`, `pytest.mark.skip`, or any equivalent skip mechanism.
+Every TODO, FIXME, HACK, or SKIP marker must either be:
+1. **Resolved** — do the work now and remove the marker, or
+2. **Linked** — include a ticket/issue reference (e.g., `TODO(#1234): ...`) so the deferral is tracked outside the code, or
+3. **Removed** — if the marker is stale, obvious, or redundant.
+
+An unresolved, unlinked TODO is noise — either commit to tracking it or delete it.
+
+In test files, never use `t.Skip()`, `skip()`, `xit()`, `xtest`, `pytest.mark.skip`, or any equivalent skip mechanism.
 
 ### `test-quality` — Test Quality
-- No mocks for internal code, SQL queries, or internal APIs
-- Mocks are ONLY acceptable for external/3rd-party API calls (HTTP clients, payment providers, etc.)
-- Follow the existing test patterns already established in this repo — read the test files first
-- Only flag when major functionality has no test coverage at all — do not require tests for every change, and do not chase edge cases or failure paths
+- Follow the existing test patterns already established in this repo — read the test files first.
+- If the repo pervasively mocks internal code (functions, SQL queries, internal APIs), flag this as a **single discussion todo** with 2–3 representative examples. Do NOT rewrite tests en masse — the pattern may be intentional. This todo is for the human to decide during summarize.
+- Mocks for external/3rd-party calls (HTTP clients, payment providers) are expected and should not be flagged.
+- Only flag coverage gaps when major functionality has no test coverage at all — do not require tests for every change, and do not chase edge cases or failure paths.
 
 ### `unused-imports` — Unused Imports
 Remove imports that are never referenced in the file. Use available tooling (`ruff`, `autoflake`, ESLint, etc.) if present in the repo — otherwise detect by inspection. Flag one todo per file with unused imports.
