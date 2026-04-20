@@ -12,7 +12,7 @@ Manages repository code quality cleanup using a SQLite todo list.
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-DB_PATH="$REPO_ROOT/.claude/repo_clean.db"
+DB_PATH="$REPO_ROOT/.repo-clean/repo_clean.db"
 ```
 
 ## Database Schema
@@ -45,7 +45,7 @@ import os
 
 db_path = os.path.join(
     subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip(),
-    ".claude", "repo_clean.db"
+    ".repo-clean", "repo_clean.db"
 )
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
@@ -61,7 +61,7 @@ Or inline:
 python3 -c "
 import sqlite3, subprocess
 root = subprocess.check_output(['git','rev-parse','--show-toplevel']).decode().strip()
-db = root + '/.claude/repo_clean.db'
+db = root + '/.repo-clean/repo_clean.db'
 conn = sqlite3.connect(db)
 # query here
 conn.commit(); conn.close()
@@ -162,7 +162,10 @@ Analyze the repository and populate the todo list. Do NOT begin working items.
 **Steps:**
 
 1. Resolve repo root and DB path via `git rev-parse --show-toplevel`
-2. **Refresh the repo-map if enabled.** If `meta.repo_map_enabled` is `"1"` and `.claude/repo-map.md` exists, read its frontmatter, run `git diff <generated_from_commit>..HEAD --name-only`, and regenerate silently if any mapped path changed (follow steps 2–6 of the `map` parameter, including the isolated commit). See `Repo Navigation Map` section. No user prompt.
+2. **Refresh the repo-map if enabled.** If `meta.repo_map_enabled` is `"1"`:
+   - If `.repo-clean/repo-map.md` does not exist, generate it by following steps 2–6 of the `map` parameter.
+   - If it exists, read its frontmatter, run `git diff <generated_from_commit>..HEAD --name-only`, and regenerate silently if any mapped path changed.
+   See `Repo Navigation Map` section. No user prompt.
 3. Read existing todos from the DB so agents do not duplicate what is already there:
    ```sql
    SELECT file_path, rule FROM todos WHERE status NOT IN ('complete', 'skipped')
@@ -253,7 +256,7 @@ Show current state without making any changes.
 
 ### `map`
 
-Generate or refresh `.claude/repo-map.md` — the navigation map for future Claude sessions. See the `Repo Navigation Map` section below for the content spec.
+Generate or refresh `.repo-clean/repo-map.md` — the navigation map for future Claude sessions. See the `Repo Navigation Map` section below for the content spec.
 
 The Python CLI handles the opt-in prompt; this parameter runs only when the user has enabled the map.
 
@@ -261,15 +264,13 @@ The Python CLI handles the opt-in prompt; this parameter runs only when the user
 
 1. Resolve repo root and DB path via `git rev-parse --show-toplevel`.
 2. Produce the map body and frontmatter per the spec.
-3. Write to `.claude/repo-map.md` (overwrite if it exists).
+3. Write to `.repo-clean/repo-map.md` (overwrite if it exists). The `.repo-clean/` directory is already gitignored by the Python CLI, so the file itself will not be committed.
 4. Insert the CLAUDE.md pointer stanza (see spec) if the anchor string is absent. Create CLAUDE.md with only that stanza if the file does not exist.
-5. Update `.gitignore` so the map file is committable:
-   - If a blanket `.claude/` or `.claude` line is present, replace that single line with two lines: `.claude/*` followed by `!.claude/repo-map.md`. Leave all other gitignore content untouched.
-   - If no blanket line exists, make sure `.claude/repo_clean.db` is explicitly listed (append if missing).
-6. **Commit the scaffold changes** as a single isolated commit so they do not get lumped into a later rule-fix commit. If `git status --porcelain` shows any changes in `.claude/repo-map.md`, `CLAUDE.md`, or `.gitignore`:
+5. Ensure `.gitignore` contains the line `.repo-clean/` (append if missing). Leave other gitignore content untouched.
+6. **Commit the pointer changes** as a single isolated commit so they do not get lumped into a later rule-fix commit. Only `CLAUDE.md` and `.gitignore` are ever committed here — the map file itself is gitignored. If `git status --porcelain` shows any changes in those two files:
    ```bash
-   git add .claude/repo-map.md CLAUDE.md .gitignore
-   git commit -m "repo-clean: scaffold navigation map"
+   git add CLAUDE.md .gitignore
+   git commit -m "repo-clean: add navigation-map pointer"
    ```
    If the tree is clean (idempotent re-run where nothing changed), skip the commit.
 7. Print one line with the output path and approximate line count.
@@ -278,7 +279,7 @@ The Python CLI handles the opt-in prompt; this parameter runs only when the user
 
 ## Repo Navigation Map
 
-A compact, mechanically-generated artifact at `.claude/repo-map.md` that helps future Claude sessions navigate the repo without grep-heavy exploration. Factual only — never opinions, rules, or gotchas (those belong in CLAUDE.md).
+A compact, mechanically-generated artifact at `.repo-clean/repo-map.md` that helps future Claude sessions navigate the repo without grep-heavy exploration. Factual only — never opinions, rules, or gotchas (those belong in CLAUDE.md). The file is local-only (gitignored) and regenerated by `repo-clean` as needed.
 
 ### Frontmatter
 
@@ -309,12 +310,12 @@ Insert this stanza into the repo's CLAUDE.md if the anchor string `A package/dir
 ````markdown
 ## Codebase navigation
 
-A package/directory map with a symbol index and dependency overview lives at `.claude/repo-map.md`. It is auto-generated by repo-clean and may be stale if its frontmatter `generated_from_commit` differs from HEAD. Consult it before broad grep/glob exploration.
+A package/directory map with a symbol index and dependency overview lives at `.repo-clean/repo-map.md` (local-only, gitignored). It is auto-generated by repo-clean and may be stale if its frontmatter `generated_from_commit` differs from HEAD — run `repo-clean build` to refresh, or `repo-clean scaffold` to regenerate from scratch. Consult it before broad grep/glob exploration.
 ````
 
 ### Git tracking
 
-`.claude/repo-map.md` **is** committed to the repo (shared team resource, like a lockfile). Only `.claude/repo_clean.db` remains gitignored.
+The entire `.repo-clean/` directory is gitignored. The map is local per contributor and regenerated on demand; nothing about it is committed except the pointer stanza in CLAUDE.md and the gitignore entry itself.
 
 ### Language support
 
@@ -323,8 +324,8 @@ Use tree-sitter for symbol extraction where available (Go, Python, JavaScript, T
 ### Regeneration behavior
 
 - The Python CLI (`repo-clean scaffold`, also triggered automatically on first fresh-start run) handles the opt-in prompt and stores `repo_map_enabled` in meta.
-- `map` — invoked by the CLI when the user opts in; generates the initial file and commits it.
-- `build` (every run) — if `repo_map_enabled == "1"`, silently refreshes when any mapped path has changed since the recorded commit.
+- `map` — invoked by the CLI when the user opts in; writes the map, inserts the CLAUDE.md pointer, and commits CLAUDE.md + `.gitignore` as an isolated pointer commit.
+- `build` (every run) — if `repo_map_enabled == "1"`: generate the map if `.repo-clean/repo-map.md` is missing, or refresh it silently when any mapped path has changed since the recorded commit.
 - `init` / `clean` / `summarize` / `status` — never touch the map.
 
 If `repo_map_enabled` is `"0"` or unset, no map-related work runs at any phase.

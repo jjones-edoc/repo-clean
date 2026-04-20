@@ -77,20 +77,33 @@ def run_test_command(repo_root: Path, command: str) -> int:
     return result.returncode
 
 
-def setup_claude_dir(repo_root: Path) -> Path:
-    claude_dir = repo_root / ".claude"
-    claude_dir.mkdir(exist_ok=True)
+REPO_CLEAN_DIR = ".repo-clean"
+LEGACY_CLAUDE_DIR = ".claude"
+DB_FILENAME = "repo_clean.db"
+
+
+def setup_repo_clean_dir(repo_root: Path) -> Path:
+    state_dir = repo_root / REPO_CLEAN_DIR
+    state_dir.mkdir(exist_ok=True)
+
+    legacy_db = repo_root / LEGACY_CLAUDE_DIR / DB_FILENAME
+    new_db = state_dir / DB_FILENAME
+    if legacy_db.exists() and not new_db.exists():
+        legacy_db.rename(new_db)
+        print(f"==> Migrated {LEGACY_CLAUDE_DIR}/{DB_FILENAME} to {REPO_CLEAN_DIR}/{DB_FILENAME}")
 
     gitignore = repo_root / ".gitignore"
+    entry = f"{REPO_CLEAN_DIR}/"
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
-        if ".claude/" not in content and ".claude" not in content:
+        if entry not in content.splitlines():
             with open(gitignore, "a", encoding="utf-8") as f:
-                f.write("\n.claude/\n")
+                sep = "" if content.endswith("\n") else "\n"
+                f.write(f"{sep}{entry}\n")
     else:
-        gitignore.write_text(".claude/\n", encoding="utf-8")
+        gitignore.write_text(f"{entry}\n", encoding="utf-8")
 
-    return claude_dir
+    return state_dir
 
 
 def run_claude_headless(prompt: str) -> int:
@@ -217,9 +230,12 @@ _NAV_HEADING_RE = re.compile(
 
 def detect_nav_artifacts(repo_root: Path) -> list[str]:
     found: list[str] = []
-    map_file = repo_root / ".claude" / "repo-map.md"
+    map_file = repo_root / REPO_CLEAN_DIR / "repo-map.md"
     if map_file.exists():
-        found.append(".claude/repo-map.md")
+        found.append(f"{REPO_CLEAN_DIR}/repo-map.md")
+    legacy_map = repo_root / LEGACY_CLAUDE_DIR / "repo-map.md"
+    if legacy_map.exists():
+        found.append(f"{LEGACY_CLAUDE_DIR}/repo-map.md")
     for name in NAV_ARTIFACT_NAMES:
         if (repo_root / name).exists():
             found.append(name)
@@ -254,6 +270,13 @@ def run_scaffold(repo_root: Path, db_path: Path) -> None:
         print("No existing navigation artifacts found.\n")
 
     current = get_meta(db_path, "repo_map_enabled")
+    map_path = repo_root / REPO_CLEAN_DIR / "repo-map.md"
+
+    if current == "1" and not map_path.exists():
+        print("Repo-map is enabled but the file is missing — generating now...\n")
+        run_claude_headless("use the repo-clean skill with the map parameter")
+        return
+
     if current in ("0", "1"):
         state = "enabled" if current == "1" else "disabled"
         change = input(f"Repo-map is currently {state}. Change? (y/n): ").strip().lower()
@@ -262,10 +285,10 @@ def run_scaffold(repo_root: Path, db_path: Path) -> None:
             return
 
     answer = input(
-        "Enable .claude/repo-map.md?\n"
+        f"Enable {REPO_CLEAN_DIR}/repo-map.md?\n"
         "  - Factual package/symbol/dependency overview for Claude Code sessions.\n"
         "  - Refreshed automatically on every `repo-clean build`.\n"
-        "  - Committed to the repo (shared team resource).\n"
+        "  - Local-only (gitignored) — each contributor generates their own on demand.\n"
         "(y/n): "
     ).strip().lower()
 
@@ -387,13 +410,16 @@ def main() -> None:
 
     if args.command == "status":
         repo_root = get_git_root()
-        db_path = repo_root / ".claude" / "repo_clean.db"
+        db_path = repo_root / REPO_CLEAN_DIR / DB_FILENAME
+        legacy_db = repo_root / LEGACY_CLAUDE_DIR / DB_FILENAME
+        if not db_path.exists() and legacy_db.exists():
+            db_path = legacy_db
         print_status(db_path)
         return
 
     repo_root = get_git_root()
-    claude_dir = setup_claude_dir(repo_root)
-    db_path = claude_dir / "repo_clean.db"
+    state_dir = setup_repo_clean_dir(repo_root)
+    db_path = state_dir / DB_FILENAME
     init_db(db_path)
 
     if args.command == "init":

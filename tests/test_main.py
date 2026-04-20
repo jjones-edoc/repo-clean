@@ -16,7 +16,7 @@ from repo_clean.main import (
     run_full,
     run_scaffold,
     seed_large_files,
-    setup_claude_dir,
+    setup_repo_clean_dir,
 )
 
 
@@ -72,25 +72,51 @@ def test_is_not_generated(tmp_path):
     assert _is_generated_or_vendored("src/real.py", f) is False
 
 
-def test_setup_claude_dir_creates_dir_and_gitignore(tmp_path):
-    claude_dir = setup_claude_dir(tmp_path)
-    assert claude_dir == tmp_path / ".claude"
-    assert claude_dir.is_dir()
-    assert ".claude/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+def test_setup_repo_clean_dir_creates_dir_and_gitignore(tmp_path):
+    state_dir = setup_repo_clean_dir(tmp_path)
+    assert state_dir == tmp_path / ".repo-clean"
+    assert state_dir.is_dir()
+    assert ".repo-clean/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
 
 
-def test_setup_claude_dir_appends_to_existing_gitignore(tmp_path):
+def test_setup_repo_clean_dir_appends_to_existing_gitignore(tmp_path):
     (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
-    setup_claude_dir(tmp_path)
+    setup_repo_clean_dir(tmp_path)
     content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "*.log" in content
-    assert ".claude/" in content
+    assert ".repo-clean/" in content
 
 
-def test_setup_claude_dir_skips_gitignore_when_already_present(tmp_path):
-    (tmp_path / ".gitignore").write_text("build/\n.claude/\n", encoding="utf-8")
-    setup_claude_dir(tmp_path)
-    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").count(".claude") == 1
+def test_setup_repo_clean_dir_skips_gitignore_when_already_present(tmp_path):
+    (tmp_path / ".gitignore").write_text("build/\n.repo-clean/\n", encoding="utf-8")
+    setup_repo_clean_dir(tmp_path)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").count(".repo-clean/") == 1
+
+
+def test_setup_repo_clean_dir_migrates_legacy_db(tmp_path):
+    legacy = tmp_path / ".claude"
+    legacy.mkdir()
+    legacy_db = legacy / "repo_clean.db"
+    legacy_db.write_bytes(b"legacy content")
+
+    state_dir = setup_repo_clean_dir(tmp_path)
+
+    assert (state_dir / "repo_clean.db").read_bytes() == b"legacy content"
+    assert not legacy_db.exists()
+
+
+def test_setup_repo_clean_dir_does_not_overwrite_existing_new_db(tmp_path):
+    legacy = tmp_path / ".claude"
+    legacy.mkdir()
+    (legacy / "repo_clean.db").write_bytes(b"legacy content")
+    state_dir_pre = tmp_path / ".repo-clean"
+    state_dir_pre.mkdir()
+    (state_dir_pre / "repo_clean.db").write_bytes(b"new content")
+
+    state_dir = setup_repo_clean_dir(tmp_path)
+
+    assert (state_dir / "repo_clean.db").read_bytes() == b"new content"
+    assert (legacy / "repo_clean.db").exists()  # legacy left in place
 
 
 def test_seed_large_files_flags_oversize_file(git_repo):
@@ -221,7 +247,7 @@ def test_run_clean_loop_no_summarize_when_failed_count_unchanged(tmp_path, monke
 
 
 def _run_full_setup(git_repo, monkeypatch):
-    db = git_repo / ".claude" / "repo_clean.db"
+    db = git_repo / ".repo-clean" / "repo_clean.db"
     db.parent.mkdir()
     init_db(db)
     monkeypatch.chdir(git_repo)
@@ -311,9 +337,16 @@ def test_detect_nav_artifacts_finds_docs_subfolder(tmp_path):
 
 
 def test_detect_nav_artifacts_finds_existing_repo_map(tmp_path):
-    claude = tmp_path / ".claude"
-    claude.mkdir()
-    (claude / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
+    state_dir = tmp_path / ".repo-clean"
+    state_dir.mkdir()
+    (state_dir / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
+    assert ".repo-clean/repo-map.md" in detect_nav_artifacts(tmp_path)
+
+
+def test_detect_nav_artifacts_finds_legacy_claude_repo_map(tmp_path):
+    legacy = tmp_path / ".claude"
+    legacy.mkdir()
+    (legacy / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
     assert ".claude/repo-map.md" in detect_nav_artifacts(tmp_path)
 
 
@@ -373,6 +406,9 @@ def test_run_scaffold_keeps_existing_preference_when_user_declines_change(tmp_pa
     conn.execute("INSERT INTO meta (key, value) VALUES ('repo_map_enabled', '1')")
     conn.commit()
     conn.close()
+    state_dir = tmp_path / ".repo-clean"
+    state_dir.mkdir()
+    (state_dir / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
 
     headless_calls = []
     monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
@@ -427,3 +463,20 @@ def test_ensure_scaffold_runs_when_unset(tmp_path, monkeypatch):
     ensure_scaffold(tmp_path, db)
 
     assert get_meta(db, "repo_map_enabled") == "0"
+
+
+def test_run_scaffold_generates_when_enabled_but_file_missing(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('repo_map_enabled', '1')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("builtins.input", lambda _: pytest.fail("should not prompt"))
+    headless_calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
+
+    run_scaffold(tmp_path, db)
+
+    assert any("map" in p for p in headless_calls)
