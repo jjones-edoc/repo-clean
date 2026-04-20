@@ -12,8 +12,8 @@ def _bundled_content() -> str:
 
 
 def sync_skill() -> None:
-    content = _bundled_content()
-    new_hash = hashlib.sha256(content.encode()).hexdigest()
+    content_bytes = _bundled_content().encode("utf-8")
+    new_hash = hashlib.sha256(content_bytes).hexdigest()
 
     if SKILL_FILE.exists():
         existing_hash = hashlib.sha256(SKILL_FILE.read_bytes()).hexdigest()
@@ -21,5 +21,5 @@ def sync_skill() -> None:
             return
 
     SKILL_DIR.mkdir(parents=True, exist_ok=True)
-    SKILL_FILE.write_text(content, encoding="utf-8")
+    SKILL_FILE.write_bytes(content_bytes)
     print(f"✓ repo-clean skill synced to {SKILL_FILE}")
