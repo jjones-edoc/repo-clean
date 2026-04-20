@@ -1,4 +1,5 @@
 import argparse
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -207,6 +208,81 @@ def ensure_init(db_path: Path) -> None:
         run_init()
 
 
+NAV_ARTIFACT_NAMES = ("AGENTS.md", "ARCHITECTURE.md", "STRUCTURE.md", "CODEBASE.md")
+_NAV_HEADING_RE = re.compile(
+    r"^#+\s+.*(?:structure|layout|packages|directory|navigation)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def detect_nav_artifacts(repo_root: Path) -> list[str]:
+    found: list[str] = []
+    map_file = repo_root / ".claude" / "repo-map.md"
+    if map_file.exists():
+        found.append(".claude/repo-map.md")
+    for name in NAV_ARTIFACT_NAMES:
+        if (repo_root / name).exists():
+            found.append(name)
+        docs_path = repo_root / "docs" / name
+        if docs_path.exists():
+            found.append(f"docs/{name}")
+    for aider_cache in repo_root.glob(".aider.tags.cache.v*"):
+        if aider_cache.is_dir():
+            found.append(aider_cache.name)
+            break
+    claude_md = repo_root / "CLAUDE.md"
+    if claude_md.exists():
+        try:
+            content = claude_md.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            content = ""
+        if _NAV_HEADING_RE.search(content):
+            found.append("CLAUDE.md (contains a navigation-style heading)")
+    return found
+
+
+def run_scaffold(repo_root: Path, db_path: Path) -> None:
+    print("\n==> Repo-map scaffold\n")
+
+    artifacts = detect_nav_artifacts(repo_root)
+    if artifacts:
+        print("Found existing navigation artifacts:")
+        for a in artifacts:
+            print(f"  - {a}")
+        print()
+    else:
+        print("No existing navigation artifacts found.\n")
+
+    current = get_meta(db_path, "repo_map_enabled")
+    if current in ("0", "1"):
+        state = "enabled" if current == "1" else "disabled"
+        change = input(f"Repo-map is currently {state}. Change? (y/n): ").strip().lower()
+        if change != "y":
+            print("Keeping current setting.")
+            return
+
+    answer = input(
+        "Enable .claude/repo-map.md?\n"
+        "  - Factual package/symbol/dependency overview for Claude Code sessions.\n"
+        "  - Refreshed automatically on every `repo-clean build`.\n"
+        "  - Committed to the repo (shared team resource).\n"
+        "(y/n): "
+    ).strip().lower()
+
+    if answer == "y":
+        set_meta(db_path, "repo_map_enabled", "1")
+        print("\n==> Generating initial repo map...\n")
+        run_claude_headless("use the repo-clean skill with the map parameter")
+    else:
+        set_meta(db_path, "repo_map_enabled", "0")
+        print("Repo-map disabled.")
+
+
+def ensure_scaffold(repo_root: Path, db_path: Path) -> None:
+    if get_meta(db_path, "repo_map_enabled") is None:
+        run_scaffold(repo_root, db_path)
+
+
 def run_fresh_start(repo_root: Path, db_path: Path) -> bool:
     ensure_init(db_path)
 
@@ -239,6 +315,8 @@ def run_fresh_start(repo_root: Path, db_path: Path) -> bool:
     branch = create_clean_branch(repo_root)
     print(f"\n==> Created branch '{branch}'")
     set_meta(db_path, "clean_branch", branch)
+
+    ensure_scaffold(repo_root, db_path)
 
     if test_cmd:
         insert_todo(
@@ -300,8 +378,8 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["init", "build", "clean", "status"],
-        help="init: detect test/lint/build commands (one-time) | build: analyze repo and create todo list | clean: run clean loop | status: show current state",
+        choices=["init", "scaffold", "build", "clean", "status"],
+        help="init: detect test/lint/build commands (one-time) | scaffold: (re)configure the .claude/repo-map.md navigation file | build: analyze repo and create todo list | clean: run clean loop | status: show current state",
     )
     args = parser.parse_args()
 
@@ -320,6 +398,8 @@ def main() -> None:
 
     if args.command == "init":
         run_init()
+    elif args.command == "scaffold":
+        run_scaffold(repo_root, db_path)
     elif args.command == "build":
         seed_large_files(repo_root, db_path)
         run_claude_headless("use the repo-clean skill with the build parameter")
