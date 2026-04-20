@@ -196,7 +196,7 @@ Interactively review the todo list with the user. Your role here is **todo list 
    - Skip an item: `UPDATE todos SET status='skipped', updated_at=? WHERE id=?`
    - Add notes to an item
    - Ask questions about the codebase or review specific files to decide whether to keep or skip an item
-4. When the user is satisfied with the list, remind them to type `/exit` to return to the clean loop
+4. When the user is satisfied with the list, remind them to type `/exit` — this will start the clean loop immediately (or, if called after cleaning, proceed to finalization)
 
 ### `status`
 

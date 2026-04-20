@@ -88,12 +88,17 @@ def seed_large_files(repo_root: Path, db_path: Path) -> None:
 
 
 def run_clean_loop(db_path: Path) -> None:
-    while True:
+    initial = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
+    cap = initial * 2
+    iterations = 0
+    while iterations < cap:
         remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
         if remaining == 0:
-            break
-        print(f"\n==> {remaining} item(s) remaining. Running clean...\n")
+            return
+        print(f"\n==> {remaining} item(s) remaining. Running clean... ({iterations + 1}/{cap})\n")
         run_claude_headless("use the repo-clean skill with the clean parameter")
+        iterations += 1
+    print(f"\n!! Iteration cap ({cap}) reached with items still pending. Run `repo-clean` again or review the todo list.")
 
 
 def run_full(repo_root: Path, db_path: Path) -> None:
@@ -108,14 +113,14 @@ def run_full(repo_root: Path, db_path: Path) -> None:
             return
 
     print("\n==> Build complete. Starting interactive review...\n")
+    print("    Exit the review session to begin cleaning.\n")
     run_claude_interactive("use the repo-clean skill with the summarize parameter")
 
-    answer = input("\nStart cleaning? (y/n): ").strip().lower()
-    if answer != "y":
-        print("Run repo-clean again to start cleaning.")
-        return
-
     run_clean_loop(db_path)
+
+    failed = count_by_status(db_path, "failed")
+    if failed:
+        print(f"\n!! {failed} item(s) failed. Review them in the summary before finalizing.")
 
     print("\n==> All pending items processed. Starting interactive summary...\n")
     run_claude_interactive("use the repo-clean skill with the summarize parameter")
