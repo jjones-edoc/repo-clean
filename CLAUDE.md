@@ -18,12 +18,12 @@ repo-clean clean     # run clean loop on existing todos
 repo-clean status    # show current state (no Claude invoked)
 ```
 
-## Architecture
+## Tests
 
-- `main.py` — CLI entry point and orchestration loop
-- `db.py` — SQLite operations (init, status counts, finalize)
-- `skill.py` — hash-checks and syncs bundled skill to `~/.claude/skills/repo-clean/SKILL.md`
-- `data/SKILL.md` — the Claude Code skill; contains all clean rules and DB interaction instructions
+```bash
+pip install -e .[test]
+pytest
+```
 
 ## Skill Sync
 
@@ -35,6 +35,6 @@ Each cleaned repo gets `.claude/repo_clean.db` (auto-added to `.gitignore`). The
 - `meta` table: `last_clean_date` (UTC ISO), `last_clean_commit` (git hash)
 - `todos` table: one row per cleanup item with status (`pending`, `in_progress`, `complete`, `failed`, `skipped`)
 
-## Clean Rules (defined in data/SKILL.md)
+## Clean Rules
 
-`dry`, `file-size`, `comments`, `dead-code`, `unused-files`, `todo-fixme`, `test-quality`, `claude-md`
+See `data/SKILL.md` for rule definitions and DB interaction protocol.

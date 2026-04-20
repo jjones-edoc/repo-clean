@@ -327,3 +327,7 @@ def main() -> None:
         run_clean_loop(db_path)
     else:
         run_full(repo_root, db_path)
+
+
+if __name__ == "__main__":
+    main()
