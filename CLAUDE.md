@@ -18,6 +18,13 @@ repo-clean clean     # run clean loop on existing todos
 repo-clean status    # show current state (no Claude invoked)
 ```
 
+## Tests
+
+```bash
+pip install -e .[test]
+pytest
+```
+
 ## Skill Sync
 
 On every invocation, `skill.py` compares a SHA-256 hash of the bundled `data/SKILL.md` against the installed skill file. If they differ, it overwrites. To update the skill, edit `data/SKILL.md` and reinstall (`pip install -e .`).
