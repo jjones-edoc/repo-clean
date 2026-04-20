@@ -45,10 +45,36 @@ def insert_todo(db_path: Path, description: str, file_path: str, rule: str, sort
     conn.close()
 
 
+def get_meta(db_path: Path, key: str) -> str | None:
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT value FROM meta WHERE key = ?", (key,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def set_meta(db_path: Path, key: str, value: str) -> None:
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
 def count_by_status(db_path: Path, status: str) -> int:
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM todos WHERE status = ?", (status,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+
+def count_all_todos(db_path: Path) -> int:
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM todos")
     count = c.fetchone()[0]
     conn.close()
     return count

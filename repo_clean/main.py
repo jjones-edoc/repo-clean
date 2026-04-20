@@ -1,9 +1,10 @@
 import argparse
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from .db import init_db, insert_todo, count_by_status, finalize_clean, print_status
+from .db import init_db, insert_todo, count_by_status, count_all_todos, finalize_clean, print_status, get_meta, set_meta
 from .skill import sync_skill
 
 
@@ -16,6 +17,63 @@ def get_git_root() -> Path:
         print("Error: Current directory is not a git repository.", file=sys.stderr)
         sys.exit(1)
     return Path(result.stdout.strip())
+
+
+def get_default_branch(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        capture_output=True, text=True, cwd=repo_root
+    )
+    if result.returncode == 0:
+        return result.stdout.strip().rsplit("/", 1)[-1]
+    return "main"
+
+
+def get_current_branch(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, cwd=repo_root
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def is_clean_tree(repo_root: Path) -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True, text=True, cwd=repo_root
+    )
+    return result.returncode == 0 and result.stdout.strip() == ""
+
+
+def branch_exists(repo_root: Path, branch: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        capture_output=True, text=True, cwd=repo_root
+    )
+    return result.returncode == 0
+
+
+def create_clean_branch(repo_root: Path) -> str:
+    base = f"repo_clean_{datetime.now().strftime('%y%m%d')}"
+    branch = base
+    suffix = 2
+    while branch_exists(repo_root, branch):
+        branch = f"{base}_{suffix}"
+        suffix += 1
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch],
+        capture_output=True, text=True, cwd=repo_root
+    )
+    if result.returncode != 0:
+        print(f"Error creating branch: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return branch
+
+
+def run_test_command(repo_root: Path, command: str) -> int:
+    print(f"==> Running tests: {command}\n")
+    result = subprocess.run(command, shell=True, cwd=repo_root)
+    return result.returncode
 
 
 def setup_claude_dir(repo_root: Path) -> Path:
@@ -122,6 +180,7 @@ def run_clean_loop(db_path: Path) -> None:
     initial = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
     cap = initial * 2
     iterations = 0
+    failed_before = count_by_status(db_path, "failed")
     while iterations < cap:
         remaining = count_by_status(db_path, "pending") + count_by_status(db_path, "in_progress")
         if remaining == 0:
@@ -129,18 +188,73 @@ def run_clean_loop(db_path: Path) -> None:
         print(f"\n==> {remaining} item(s) remaining. Running clean... ({iterations + 1}/{cap})\n")
         run_claude_headless("use the repo-clean skill with the clean parameter")
         iterations += 1
+
+        failed_after = count_by_status(db_path, "failed")
+        if failed_after > failed_before:
+            print(f"\n!! New failure(s) detected. Launching summarize to investigate or unblock...\n")
+            run_claude_interactive("use the repo-clean skill with the summarize parameter")
+        failed_before = failed_after
     print(f"\n!! Iteration cap ({cap}) reached with items still pending. Run `repo-clean` again or review the todo list.")
 
 
-def run_full(repo_root: Path, db_path: Path) -> None:
-    if count_by_status(db_path, "pending") == 0 and count_by_status(db_path, "in_progress") == 0:
-        print("\n==> No pending items. Running build phase...\n")
-        seed_large_files(repo_root, db_path)
-        run_claude_headless("use the repo-clean skill with the build parameter")
+def run_init(db_path: Path) -> None:
+    print("\n==> Running repo initialization (one-time detection of test/lint/build commands)...\n")
+    run_claude_headless("use the repo-clean skill with the init parameter")
 
-        if count_by_status(db_path, "pending") == 0:
-            print("\n✓ No issues found. Repository is already clean!")
-            finalize_clean(db_path)
+
+def ensure_init(db_path: Path) -> None:
+    if get_meta(db_path, "init_done") != "1":
+        run_init(db_path)
+
+
+def run_fresh_start(repo_root: Path, db_path: Path) -> bool:
+    ensure_init(db_path)
+
+    default = get_default_branch(repo_root)
+    current = get_current_branch(repo_root)
+    if current != default:
+        print(f"Error: Must run on default branch '{default}' (currently on '{current}').", file=sys.stderr)
+        sys.exit(1)
+    if not is_clean_tree(repo_root):
+        print("Error: Working tree has uncommitted or untracked changes. Commit, stash, or clean them before running repo-clean.", file=sys.stderr)
+        sys.exit(1)
+
+    test_cmd = (get_meta(db_path, "test_command") or "").strip()
+    if test_cmd:
+        rc = run_test_command(repo_root, test_cmd)
+        if rc != 0:
+            print(f"\n!! Pre-flight tests failed (exit code {rc}). Fix tests before running repo-clean.", file=sys.stderr)
+            sys.exit(1)
+        print("\n✓ Pre-flight tests passed.")
+
+    print("\n==> Running build phase...\n")
+    seed_large_files(repo_root, db_path)
+    run_claude_headless("use the repo-clean skill with the build parameter")
+
+    if count_by_status(db_path, "pending") == 0:
+        print("\n✓ No issues found. Repository is already clean!")
+        finalize_clean(db_path)
+        return False
+
+    branch = create_clean_branch(repo_root)
+    print(f"\n==> Created branch '{branch}'")
+    set_meta(db_path, "clean_branch", branch)
+
+    if test_cmd:
+        insert_todo(
+            db_path,
+            description=f"Re-run tests and verify all pass: {test_cmd}",
+            file_path="",
+            rule="test-verify",
+            sort_order=99999,
+        )
+
+    return True
+
+
+def run_full(repo_root: Path, db_path: Path) -> None:
+    if count_all_todos(db_path) == 0:
+        if not run_fresh_start(repo_root, db_path):
             return
 
     print("\n==> Build complete. Starting interactive review...\n")
@@ -157,10 +271,25 @@ def run_full(repo_root: Path, db_path: Path) -> None:
     run_claude_interactive("use the repo-clean skill with the summarize parameter")
 
     answer = input("\nMark repository as clean and clear todo list? (y/n): ").strip().lower()
-    if answer == "y":
-        finalize_clean(db_path)
-    else:
+    if answer != "y":
         print("Run repo-clean again to continue cleaning.")
+        return
+
+    all_complete = (
+        count_by_status(db_path, "pending") == 0
+        and count_by_status(db_path, "in_progress") == 0
+        and count_by_status(db_path, "failed") == 0
+        and count_by_status(db_path, "skipped") == 0
+        and count_all_todos(db_path) > 0
+    )
+
+    if all_complete:
+        print("\n==> All items completed. Launching /source-control to update docs, commit, push, and open a PR...\n")
+        run_claude_interactive("use the source-control skill to update any needed documentation, then commit, push, and open a PR for this repo-clean branch")
+    else:
+        print("\n==> Skipping auto-PR — not all items completed. Push and open a PR manually if desired.")
+
+    finalize_clean(db_path)
 
 
 def main() -> None:
@@ -171,8 +300,8 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["build", "clean", "status"],
-        help="build: analyze repo and create todo list | clean: run clean loop | status: show current state",
+        choices=["init", "build", "clean", "status"],
+        help="init: detect test/lint/build commands (one-time) | build: analyze repo and create todo list | clean: run clean loop | status: show current state",
     )
     args = parser.parse_args()
 
@@ -189,7 +318,9 @@ def main() -> None:
     db_path = claude_dir / "repo_clean.db"
     init_db(db_path)
 
-    if args.command == "build":
+    if args.command == "init":
+        run_init(db_path)
+    elif args.command == "build":
         seed_large_files(repo_root, db_path)
         run_claude_headless("use the repo-clean skill with the build parameter")
     elif args.command == "clean":

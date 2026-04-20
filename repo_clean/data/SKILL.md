@@ -130,6 +130,31 @@ If the repo contains CLAUDE.md files, ensure they follow best practices:
 
 ## Parameters
 
+### `init`
+
+One-time repository profiling. Detect the commands needed to verify the repo (tests, lint, build) and any non-obvious constraints. Results are cached in `meta` and reused on every subsequent run — do not re-run unless the user explicitly invokes `repo-clean init`.
+
+**Steps:**
+
+1. Resolve repo root and DB path via `git rev-parse --show-toplevel`.
+2. Examine the repo to identify:
+   - **Test command** — the canonical command to run the full test suite. Check `Makefile`, `Justfile`, `package.json` scripts, `pyproject.toml`, `go.mod`, `Cargo.toml`, CI workflow files (`.github/workflows/*`, `.gitlab-ci.yml`), and any `README` instructions. Prefer the command CI uses. Null if no tests exist.
+   - **Lint command** — likewise (`ruff check`, `eslint`, `golangci-lint`, `make lint`, etc.). Null if none.
+   - **Build command** — for compiled languages or explicit build steps. Null if not applicable.
+   - **Language notes** — brief free-text on anything a cleanup phase should know (e.g., "tests require DATABASE_URL", "Makefile wraps pytest with coverage reporting", "tests are split into unit/integration — unit is fast default").
+3. Write findings to the `meta` table:
+   ```python
+   def setm(k, v):
+       c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (k, v if v is not None else ""))
+   setm("test_command", test_cmd)
+   setm("lint_command", lint_cmd)
+   setm("build_command", build_cmd)
+   setm("language_notes", notes)
+   setm("init_done", "1")
+   ```
+   Store `""` (empty string) for not-found values so they can be distinguished from un-checked.
+4. Print a summary of what was detected. Keep it to 5–10 lines.
+
 ### `build`
 
 Analyze the repository and populate the todo list. Do NOT begin working items.
@@ -164,7 +189,7 @@ Work ONE pending todo item, then exit. The calling script handles the loop.
 
 **Steps:**
 
-1. Resolve repo root and DB path
+1. Resolve repo root and DB path.
 2. Fetch next item (resume any interrupted in_progress item first):
    ```sql
    SELECT * FROM todos WHERE status IN ('in_progress', 'pending') ORDER BY CASE status WHEN 'in_progress' THEN 0 ELSE 1 END, sort_order LIMIT 1
@@ -175,21 +200,30 @@ Work ONE pending todo item, then exit. The calling script handles the loop.
    now = ...isoformat()
    c.execute("UPDATE todos SET status='in_progress', updated_at=? WHERE id=?", (now, item_id))
    ```
-4. Work the item — read the file, make the necessary changes, run tests if applicable
-5. If you discover additional violations while working, INSERT them as new `pending` todos (append to end of sort_order)
-6. On success:
+4. **Special-case `test-verify` rule.** If `rule == 'test-verify'`, do not modify code. Read `test_command` from `meta`, run it (via `subprocess.run(cmd, shell=True, cwd=repo_root)`), and mark `complete` on exit code 0 or `failed` with the exit code and a short excerpt of stderr on non-zero. Do not commit. Skip steps 5–7.
+5. Work the item — read the file, make the necessary changes, run tests if applicable.
+6. If you discover additional violations while working, INSERT them as new `pending` todos (append to end of sort_order).
+7. **Commit the work locally** (before updating status):
+   ```bash
+   if [ -n "$(git status --porcelain)" ]; then
+       git add -A
+       git commit -m "repo-clean: <description> (rule: <rule>)"
+   fi
+   ```
+   If `git status --porcelain` is empty, the agent made no file changes — skip the commit but still mark complete (the item was a misdetection or already resolved).
+8. On success:
    ```python
    c.execute("UPDATE todos SET status='complete', updated_at=? WHERE id=?", (now, item_id))
    ```
-7. On failure — document exactly what you tried:
+9. On failure — document exactly what you tried, and do NOT commit partial changes (revert them with `git checkout -- .` and `git clean -fd` if the agent made any):
    ```python
    c.execute("UPDATE todos SET status='failed', notes=?, updated_at=? WHERE id=?", (notes, now, item_id))
    ```
-8. Print what was done (or why it failed) and exit
+10. Print what was done (or why it failed) and exit.
 
 ### `summarize`
 
-Interactively review the todo list with the user. Your role here is **todo list management only** — do NOT work, fix, or implement any items. Stay in conversation until the user says they are done.
+Interactively review the todo list with the user. Primary role is todo list management and interactive review. Do NOT proactively fix or implement items — wait for the user to direct you. The user MAY ask you to investigate code, attempt a fix, or unblock a failed item — when they do, help them. Stay in conversation until the user says they are done.
 
 **Steps:**
 
