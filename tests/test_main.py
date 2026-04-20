@@ -8,12 +8,15 @@ from repo_clean.db import count_all_todos, count_by_status, get_meta, init_db
 from repo_clean.main import (
     _is_generated_or_vendored,
     branch_exists,
+    detect_nav_artifacts,
+    ensure_scaffold,
     get_current_branch,
     is_clean_tree,
     run_clean_loop,
     run_full,
+    run_scaffold,
     seed_large_files,
-    setup_claude_dir,
+    setup_repo_clean_dir,
 )
 
 
@@ -69,25 +72,51 @@ def test_is_not_generated(tmp_path):
     assert _is_generated_or_vendored("src/real.py", f) is False
 
 
-def test_setup_claude_dir_creates_dir_and_gitignore(tmp_path):
-    claude_dir = setup_claude_dir(tmp_path)
-    assert claude_dir == tmp_path / ".claude"
-    assert claude_dir.is_dir()
-    assert ".claude/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+def test_setup_repo_clean_dir_creates_dir_and_gitignore(tmp_path):
+    state_dir = setup_repo_clean_dir(tmp_path)
+    assert state_dir == tmp_path / ".repo-clean"
+    assert state_dir.is_dir()
+    assert ".repo-clean/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
 
 
-def test_setup_claude_dir_appends_to_existing_gitignore(tmp_path):
+def test_setup_repo_clean_dir_appends_to_existing_gitignore(tmp_path):
     (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
-    setup_claude_dir(tmp_path)
+    setup_repo_clean_dir(tmp_path)
     content = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "*.log" in content
-    assert ".claude/" in content
+    assert ".repo-clean/" in content
 
 
-def test_setup_claude_dir_skips_gitignore_when_already_present(tmp_path):
-    (tmp_path / ".gitignore").write_text("build/\n.claude/\n", encoding="utf-8")
-    setup_claude_dir(tmp_path)
-    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").count(".claude") == 1
+def test_setup_repo_clean_dir_skips_gitignore_when_already_present(tmp_path):
+    (tmp_path / ".gitignore").write_text("build/\n.repo-clean/\n", encoding="utf-8")
+    setup_repo_clean_dir(tmp_path)
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").count(".repo-clean/") == 1
+
+
+def test_setup_repo_clean_dir_migrates_legacy_db(tmp_path):
+    legacy = tmp_path / ".claude"
+    legacy.mkdir()
+    legacy_db = legacy / "repo_clean.db"
+    legacy_db.write_bytes(b"legacy content")
+
+    state_dir = setup_repo_clean_dir(tmp_path)
+
+    assert (state_dir / "repo_clean.db").read_bytes() == b"legacy content"
+    assert not legacy_db.exists()
+
+
+def test_setup_repo_clean_dir_does_not_overwrite_existing_new_db(tmp_path):
+    legacy = tmp_path / ".claude"
+    legacy.mkdir()
+    (legacy / "repo_clean.db").write_bytes(b"legacy content")
+    state_dir_pre = tmp_path / ".repo-clean"
+    state_dir_pre.mkdir()
+    (state_dir_pre / "repo_clean.db").write_bytes(b"new content")
+
+    state_dir = setup_repo_clean_dir(tmp_path)
+
+    assert (state_dir / "repo_clean.db").read_bytes() == b"new content"
+    assert (legacy / "repo_clean.db").exists()  # legacy left in place
 
 
 def test_seed_large_files_flags_oversize_file(git_repo):
@@ -218,7 +247,7 @@ def test_run_clean_loop_no_summarize_when_failed_count_unchanged(tmp_path, monke
 
 
 def _run_full_setup(git_repo, monkeypatch):
-    db = git_repo / ".claude" / "repo_clean.db"
+    db = git_repo / ".repo-clean" / "repo_clean.db"
     db.parent.mkdir()
     init_db(db)
     monkeypatch.chdir(git_repo)
@@ -284,3 +313,170 @@ def test_run_full_user_declines_finalize(git_repo, monkeypatch, capsys):
     assert "Run repo-clean again" in capsys.readouterr().out
     assert get_meta(db, "last_clean_commit") is None  # finalize did NOT run
     assert count_all_todos(db) == 1  # todos preserved
+
+
+# ---- detect_nav_artifacts ----
+
+
+def test_detect_nav_artifacts_empty(tmp_path):
+    assert detect_nav_artifacts(tmp_path) == []
+
+
+def test_detect_nav_artifacts_finds_root_markdown(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("x\n", encoding="utf-8")
+    (tmp_path / "ARCHITECTURE.md").write_text("x\n", encoding="utf-8")
+    found = detect_nav_artifacts(tmp_path)
+    assert "AGENTS.md" in found
+    assert "ARCHITECTURE.md" in found
+
+
+def test_detect_nav_artifacts_finds_docs_subfolder(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "STRUCTURE.md").write_text("x\n", encoding="utf-8")
+    assert "docs/STRUCTURE.md" in detect_nav_artifacts(tmp_path)
+
+
+def test_detect_nav_artifacts_finds_existing_repo_map(tmp_path):
+    state_dir = tmp_path / ".repo-clean"
+    state_dir.mkdir()
+    (state_dir / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
+    assert ".repo-clean/repo-map.md" in detect_nav_artifacts(tmp_path)
+
+
+def test_detect_nav_artifacts_finds_legacy_claude_repo_map(tmp_path):
+    legacy = tmp_path / ".claude"
+    legacy.mkdir()
+    (legacy / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
+    assert ".claude/repo-map.md" in detect_nav_artifacts(tmp_path)
+
+
+def test_detect_nav_artifacts_finds_aider_cache(tmp_path):
+    cache = tmp_path / ".aider.tags.cache.v3"
+    cache.mkdir()
+    found = detect_nav_artifacts(tmp_path)
+    assert any(f.startswith(".aider.tags.cache") for f in found)
+
+
+def test_detect_nav_artifacts_finds_claude_md_nav_heading(tmp_path):
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\n## Project Structure\n\nstuff\n", encoding="utf-8")
+    found = detect_nav_artifacts(tmp_path)
+    assert any("CLAUDE.md" in f for f in found)
+
+
+def test_detect_nav_artifacts_ignores_claude_md_without_nav_heading(tmp_path):
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\n## Install\n\nstuff\n", encoding="utf-8")
+    assert detect_nav_artifacts(tmp_path) == []
+
+
+# ---- run_scaffold / ensure_scaffold ----
+
+
+def test_run_scaffold_enables_and_invokes_map(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+
+    headless_calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+
+    run_scaffold(tmp_path, db)
+
+    assert get_meta(db, "repo_map_enabled") == "1"
+    assert any("map" in p for p in headless_calls)
+
+
+def test_run_scaffold_disables_without_invoking_map(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+
+    headless_calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+
+    run_scaffold(tmp_path, db)
+
+    assert get_meta(db, "repo_map_enabled") == "0"
+    assert headless_calls == []
+
+
+def test_run_scaffold_keeps_existing_preference_when_user_declines_change(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('repo_map_enabled', '1')")
+    conn.commit()
+    conn.close()
+    state_dir = tmp_path / ".repo-clean"
+    state_dir.mkdir()
+    (state_dir / "repo-map.md").write_text("---\n---\n", encoding="utf-8")
+
+    headless_calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+
+    run_scaffold(tmp_path, db)
+
+    assert get_meta(db, "repo_map_enabled") == "1"  # unchanged
+    assert headless_calls == []  # no regeneration
+
+
+def test_run_scaffold_changes_preference_when_user_confirms(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('repo_map_enabled', '0')")
+    conn.commit()
+    conn.close()
+
+    answers = iter(["y", "y"])  # first: change? second: enable?
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    headless_calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
+
+    run_scaffold(tmp_path, db)
+
+    assert get_meta(db, "repo_map_enabled") == "1"
+    assert any("map" in p for p in headless_calls)
+
+
+def test_ensure_scaffold_skips_when_already_set(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('repo_map_enabled', '0')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("builtins.input", lambda _: pytest.fail("should not prompt"))
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: pytest.fail("should not call"))
+
+    ensure_scaffold(tmp_path, db)  # must not raise
+
+
+def test_ensure_scaffold_runs_when_unset(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: 0)
+
+    ensure_scaffold(tmp_path, db)
+
+    assert get_meta(db, "repo_map_enabled") == "0"
+
+
+def test_run_scaffold_generates_when_enabled_but_file_missing(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO meta (key, value) VALUES ('repo_map_enabled', '1')")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr("builtins.input", lambda _: pytest.fail("should not prompt"))
+    headless_calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: headless_calls.append(p) or 0)
+
+    run_scaffold(tmp_path, db)
+
+    assert any("map" in p for p in headless_calls)

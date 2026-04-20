@@ -12,7 +12,7 @@ Manages repository code quality cleanup using a SQLite todo list.
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-DB_PATH="$REPO_ROOT/.claude/repo_clean.db"
+DB_PATH="$REPO_ROOT/.repo-clean/repo_clean.db"
 ```
 
 ## Database Schema
@@ -45,7 +45,7 @@ import os
 
 db_path = os.path.join(
     subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip(),
-    ".claude", "repo_clean.db"
+    ".repo-clean", "repo_clean.db"
 )
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
@@ -61,7 +61,7 @@ Or inline:
 python3 -c "
 import sqlite3, subprocess
 root = subprocess.check_output(['git','rev-parse','--show-toplevel']).decode().strip()
-db = root + '/.claude/repo_clean.db'
+db = root + '/.repo-clean/repo_clean.db'
 conn = sqlite3.connect(db)
 # query here
 conn.commit(); conn.close()
@@ -162,17 +162,21 @@ Analyze the repository and populate the todo list. Do NOT begin working items.
 **Steps:**
 
 1. Resolve repo root and DB path via `git rev-parse --show-toplevel`
-2. Read existing todos from the DB so agents do not duplicate what is already there:
+2. **Refresh the repo-map if enabled.** If `meta.repo_map_enabled` is `"1"`:
+   - If `.repo-clean/repo-map.md` does not exist, generate it by following steps 2–6 of the `map` parameter.
+   - If it exists, read its frontmatter, run `git diff <generated_from_commit>..HEAD --name-only`, and regenerate silently if any mapped path changed.
+   See `Repo Navigation Map` section. No user prompt.
+3. Read existing todos from the DB so agents do not duplicate what is already there:
    ```sql
    SELECT file_path, rule FROM todos WHERE status NOT IN ('complete', 'skipped')
    ```
-3. Query `meta` for `last_clean_commit`:
+4. Query `meta` for `last_clean_commit`:
    - Found → `git diff <hash>..HEAD --name-only` → determine the set of changed files
    - Not found → full codebase scan
-4. You are the orchestrator. Spawn agents to detect violations — one agent per rule. Launch up to 4 agents at a time and work through all rules before proceeding. Rules to cover (skip `file-size`, already seeded by the caller):
+5. You are the orchestrator. Spawn agents to detect violations — one agent per rule. Launch up to 4 agents at a time and work through all rules before proceeding. Rules to cover (skip `file-size`, already seeded by the caller):
    - `dead-code`, `unused-files`, `unused-imports`, `unused-deps`, `todo-fixme`, `comments`, `dry`, `test-quality`, `claude-md`
-5. Brief each agent with: the rule definition (from the Clean Rules section), the repo root path, the set of files to scan, and the list of existing todos to avoid duplicating. Tell each agent to return a list of violations in the format: `file_path | description`.
-6. Collect all agent results. For each violation not already in the existing todos, INSERT a todo:
+6. Brief each agent with: the rule definition (from the Clean Rules section), the repo root path, the set of files to scan, and the list of existing todos to avoid duplicating. Tell each agent to return a list of violations in the format: `file_path | description`.
+7. Collect all agent results. For each violation not already in the existing todos, INSERT a todo:
    ```python
    now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
    c.execute("""
@@ -180,8 +184,8 @@ Analyze the repository and populate the todo list. Do NOT begin working items.
        VALUES (?, ?, ?, ?, 'pending', ?, ?)
    """, (sort_order, description, file_path, rule, now, now))
    ```
-7. Order todos: `file-size` first, then `dead-code`, then `unused-files`, then `unused-imports`, then `unused-deps`, then `todo-fixme`, then `comments`, then `dry`, then `test-quality`, then `claude-md`
-8. Print a summary of what was found grouped by rule, including any `file-size` items already in the list
+8. Order todos: `file-size` first, then `dead-code`, then `unused-files`, then `unused-imports`, then `unused-deps`, then `todo-fixme`, then `comments`, then `dry`, then `test-quality`, then `claude-md`
+9. Print a summary of what was found grouped by rule, including any `file-size` items already in the list
 
 ### `clean`
 
@@ -249,3 +253,79 @@ Show current state without making any changes.
 2. Print meta values
 3. Print todo counts by status
 4. List all non-complete, non-skipped todos: id, status, rule, file_path, description, notes
+
+### `map`
+
+Generate or refresh `.repo-clean/repo-map.md` — the navigation map for future Claude sessions. See the `Repo Navigation Map` section below for the content spec.
+
+The Python CLI handles the opt-in prompt; this parameter runs only when the user has enabled the map.
+
+**Steps:**
+
+1. Resolve repo root and DB path via `git rev-parse --show-toplevel`.
+2. Produce the map body and frontmatter per the spec.
+3. Write to `.repo-clean/repo-map.md` (overwrite if it exists). The `.repo-clean/` directory is already gitignored by the Python CLI, so the file itself will not be committed.
+4. Insert the CLAUDE.md pointer stanza (see spec) if the anchor string is absent. Create CLAUDE.md with only that stanza if the file does not exist.
+5. Ensure `.gitignore` contains the line `.repo-clean/` (append if missing). Leave other gitignore content untouched.
+6. **Commit the pointer changes** as a single isolated commit so they do not get lumped into a later rule-fix commit. Only `CLAUDE.md` and `.gitignore` are ever committed here — the map file itself is gitignored. If `git status --porcelain` shows any changes in those two files:
+   ```bash
+   git add CLAUDE.md .gitignore
+   git commit -m "repo-clean: add navigation-map pointer"
+   ```
+   If the tree is clean (idempotent re-run where nothing changed), skip the commit.
+7. Print one line with the output path and approximate line count.
+
+---
+
+## Repo Navigation Map
+
+A compact, mechanically-generated artifact at `.repo-clean/repo-map.md` that helps future Claude sessions navigate the repo without grep-heavy exploration. Factual only — never opinions, rules, or gotchas (those belong in CLAUDE.md). The file is local-only (gitignored) and regenerated by `repo-clean` as needed.
+
+### Frontmatter
+
+```yaml
+---
+generated_at: <UTC ISO timestamp>
+generated_from_commit: <git rev-parse HEAD>
+file_count: <count of non-excluded source files>
+---
+```
+
+### Body sections (in order)
+
+1. **Package/directory index** — one line per top-level dir: `name — purpose`. Derive purpose from package doc, first docstring, or README if present. If none, leave blank — never invent.
+2. **Entry points** — `main`, `cmd/*`, `index.*`, scripts declared in `pyproject.toml` / `package.json` / `go.mod`.
+3. **Top symbols per package** — up to 5 exported funcs/types per package, ranked by inbound references. Use tree-sitter where available; skip packages whose files fail to parse.
+4. **Dependency edges** — top 10 most-imported internal packages.
+5. **Excluded paths** — gitignore patterns plus detected generated files (e.g., `g_*.go`, `*_pb.go`, `__pycache__`, `dist/`).
+
+### Size cap
+
+Hard cap at 300 lines. If the content exceeds it, truncate in this order: reduce symbols per package (section 3) → drop the dependency edges section → shorten purpose lines. Never truncate the package index — it is the primary value.
+
+### CLAUDE.md pointer
+
+Insert this stanza into the repo's CLAUDE.md if the anchor string `A package/directory map` is not already present. If CLAUDE.md does not exist, create one containing only this stanza.
+
+````markdown
+## Codebase navigation
+
+A package/directory map with a symbol index and dependency overview lives at `.repo-clean/repo-map.md` (local-only, gitignored). It is auto-generated by repo-clean and may be stale if its frontmatter `generated_from_commit` differs from HEAD — run `repo-clean build` to refresh, or `repo-clean scaffold` to regenerate from scratch. Consult it before broad grep/glob exploration.
+````
+
+### Git tracking
+
+The entire `.repo-clean/` directory is gitignored. The map is local per contributor and regenerated on demand; nothing about it is committed except the pointer stanza in CLAUDE.md and the gitignore entry itself.
+
+### Language support
+
+Use tree-sitter for symbol extraction where available (Go, Python, JavaScript, TypeScript, Rust, Java, C/C++, Ruby, C#, PHP, Swift). For unsupported languages, fall back to the directory tree + file counts only and skip section 3.
+
+### Regeneration behavior
+
+- The Python CLI (`repo-clean scaffold`, also triggered automatically on first fresh-start run) handles the opt-in prompt and stores `repo_map_enabled` in meta.
+- `map` — invoked by the CLI when the user opts in; writes the map, inserts the CLAUDE.md pointer, and commits CLAUDE.md + `.gitignore` as an isolated pointer commit.
+- `build` (every run) — if `repo_map_enabled == "1"`: generate the map if `.repo-clean/repo-map.md` is missing, or refresh it silently when any mapped path has changed since the recorded commit.
+- `init` / `clean` / `summarize` / `status` — never touch the map.
+
+If `repo_map_enabled` is `"0"` or unset, no map-related work runs at any phase.
