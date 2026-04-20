@@ -1,16 +1,42 @@
+import sqlite3
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
-from repo_clean.db import count_all_todos, init_db
+from repo_clean.db import count_all_todos, count_by_status, get_meta, init_db
 from repo_clean.main import (
     _is_generated_or_vendored,
     branch_exists,
     get_current_branch,
     is_clean_tree,
+    run_clean_loop,
+    run_full,
     seed_large_files,
     setup_claude_dir,
 )
+
+
+def _seed_todo(db_path, status="pending", sort_order=0, file_path="x.py", rule="comments"):
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO todos (sort_order, description, file_path, rule, status, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sort_order, f"{rule} on {file_path}", file_path, rule, status, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _set_status(db_path, where_status, new_status):
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE todos SET status=? WHERE id=(SELECT MIN(id) FROM todos WHERE status=?)",
+        (new_status, where_status),
+    )
+    conn.commit()
+    conn.close()
 
 
 @pytest.mark.parametrize("rel_path", [
@@ -104,3 +130,157 @@ def test_branch_and_tree_helpers(git_repo, monkeypatch):
 
     (git_repo / "new.txt").write_text("x\n", encoding="utf-8")
     assert is_clean_tree(git_repo) is False
+
+
+def test_run_clean_loop_noop_when_empty(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "test.db"
+    init_db(db)
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: pytest.fail("should not be called"))
+    run_clean_loop(db)
+    assert "remaining" not in capsys.readouterr().out
+
+
+def test_run_clean_loop_iteration_cap(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "test.db"
+    init_db(db)
+    _seed_todo(db)
+
+    calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: calls.append(p) or 0)
+
+    run_clean_loop(db)
+
+    assert len(calls) == 2  # cap = initial (1) * 2
+    assert "Iteration cap (2) reached" in capsys.readouterr().out
+    assert count_by_status(db, "pending") == 1
+
+
+def test_run_clean_loop_completes_work_and_exits(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    _seed_todo(db, file_path="a.py")
+    _seed_todo(db, file_path="b.py", sort_order=1)
+
+    def fake_headless(prompt):
+        _set_status(db, "pending", "complete")
+        return 0
+
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", fake_headless)
+
+    run_clean_loop(db)
+
+    assert count_by_status(db, "complete") == 2
+    assert count_by_status(db, "pending") == 0
+
+
+def test_run_clean_loop_triggers_summarize_on_new_failure(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    _seed_todo(db)
+
+    def fake_headless(prompt):
+        _set_status(db, "pending", "failed")
+        return 0
+
+    interactive = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", fake_headless)
+    monkeypatch.setattr(
+        "repo_clean.main.run_claude_interactive",
+        lambda p: interactive.append(p) or 0,
+    )
+
+    run_clean_loop(db)
+
+    assert len(interactive) == 1
+    assert "summarize" in interactive[0]
+
+
+def test_run_clean_loop_no_summarize_when_failed_count_unchanged(tmp_path, monkeypatch):
+    db = tmp_path / "test.db"
+    init_db(db)
+    _seed_todo(db, status="failed")
+    _seed_todo(db, file_path="b.py", sort_order=1)
+
+    def fake_headless(prompt):
+        _set_status(db, "pending", "complete")
+        return 0
+
+    interactive = []
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", fake_headless)
+    monkeypatch.setattr(
+        "repo_clean.main.run_claude_interactive",
+        lambda p: interactive.append(p) or 0,
+    )
+
+    run_clean_loop(db)
+
+    assert interactive == []
+
+
+def _run_full_setup(git_repo, monkeypatch):
+    db = git_repo / ".claude" / "repo_clean.db"
+    db.parent.mkdir()
+    init_db(db)
+    monkeypatch.chdir(git_repo)
+    return db
+
+
+def test_run_full_exits_when_fresh_start_returns_false(git_repo, monkeypatch):
+    db = _run_full_setup(git_repo, monkeypatch)
+    monkeypatch.setattr("repo_clean.main.run_fresh_start", lambda r, d: False)
+    calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_interactive", lambda p: calls.append(p) or 0)
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: 0)
+
+    run_full(git_repo, db)
+
+    assert calls == []
+
+
+def test_run_full_source_control_when_all_complete(git_repo, monkeypatch):
+    db = _run_full_setup(git_repo, monkeypatch)
+    _seed_todo(db, status="complete")
+
+    calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_interactive", lambda p: calls.append(p) or 0)
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: 0)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+
+    run_full(git_repo, db)
+
+    assert any("source-control" in p for p in calls)
+    assert get_meta(db, "last_clean_commit")  # finalize ran
+
+
+def test_run_full_skips_source_control_when_items_failed(git_repo, monkeypatch, capsys):
+    db = _run_full_setup(git_repo, monkeypatch)
+    _seed_todo(db, status="complete", file_path="a.py")
+    _seed_todo(db, status="failed", file_path="b.py", sort_order=1)
+
+    calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_interactive", lambda p: calls.append(p) or 0)
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: 0)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+
+    run_full(git_repo, db)
+
+    assert not any("source-control" in p for p in calls)
+    assert "Skipping auto-PR" in capsys.readouterr().out
+    assert get_meta(db, "last_clean_commit")  # finalize still ran
+
+
+def test_run_full_user_declines_finalize(git_repo, monkeypatch, capsys):
+    db = _run_full_setup(git_repo, monkeypatch)
+    _seed_todo(db, status="complete")
+
+    calls = []
+    monkeypatch.setattr("repo_clean.main.run_claude_interactive", lambda p: calls.append(p) or 0)
+    monkeypatch.setattr("repo_clean.main.run_claude_headless", lambda p: 0)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+
+    run_full(git_repo, db)
+
+    assert not any("source-control" in p for p in calls)
+    assert "Run repo-clean again" in capsys.readouterr().out
+    assert get_meta(db, "last_clean_commit") is None  # finalize did NOT run
+    assert count_all_todos(db) == 1  # todos preserved
