@@ -197,14 +197,14 @@ def run_clean_loop(db_path: Path) -> None:
     print(f"\n!! Iteration cap ({cap}) reached with items still pending. Run `repo-clean` again or review the todo list.")
 
 
-def run_init(db_path: Path) -> None:
+def run_init() -> None:
     print("\n==> Running repo initialization (one-time detection of test/lint/build commands)...\n")
     run_claude_headless("use the repo-clean skill with the init parameter")
 
 
 def ensure_init(db_path: Path) -> None:
     if get_meta(db_path, "init_done") != "1":
-        run_init(db_path)
+        run_init()
 
 
 def run_fresh_start(repo_root: Path, db_path: Path) -> bool:
@@ -319,7 +319,7 @@ def main() -> None:
     init_db(db_path)
 
     if args.command == "init":
-        run_init(db_path)
+        run_init()
     elif args.command == "build":
         seed_large_files(repo_root, db_path)
         run_claude_headless("use the repo-clean skill with the build parameter")
